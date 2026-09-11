@@ -1,9 +1,10 @@
 """ShopifyStore context representing a connected Shopify store."""
 
 from .shopify_client import ShopifyClient
-from typing import Optional, ClassVar
+from typing import Optional, ClassVar, List
 import json
 import os
+import asyncio
 
 class ShopifyStore:
     """
@@ -23,6 +24,44 @@ class ShopifyStore:
         self.shop_domain = shop_domain
         self.store_name = store_name or shop_domain.replace('.myshopify.com', '')
         self.client = ShopifyClient(shop_domain, access_token)
+        # Cache of all distinct product_type values in this store.
+        # Populated lazily on first access via ensure_product_types_loaded().
+        self._product_types: Optional[List[str]] = None
+
+    @property
+    def product_types(self) -> List[str]:
+        """
+        Return the cached list of product types.
+        Returns an empty list if not yet loaded (call ensure_product_types_loaded first).
+        """
+        return self._product_types or []
+
+    def ensure_product_types_loaded(self) -> None:
+        """
+        Synchronously fetch and cache all product types from the store.
+        Safe to call from both sync (__call__) and async (process_command) contexts.
+        Only makes the API call once; subsequent calls are no-ops.
+        """
+        if self._product_types is not None:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        self._product_types = loop.run_until_complete(
+            self.client.get_all_product_types()
+        )
+
+    async def ensure_product_types_loaded_async(self) -> None:
+        """
+        Async version: fetch and cache product types if not yet loaded.
+        Call this at the top of any async process_command that needs product types.
+        """
+        if self._product_types is None:
+            self._product_types = await self.client.get_all_product_types()
 
     def __repr__(self):
         return f"ShopifyStore({self.store_name})"

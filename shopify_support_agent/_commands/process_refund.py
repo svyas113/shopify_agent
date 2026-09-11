@@ -135,11 +135,17 @@ class ResponseGenerator:
         command_parameters: Signature.Input,
     ) -> fastworkflow.CommandOutput:
         import asyncio
-        # We wrap in asyncio.run to maintain parity with your existing commands
-        response = asyncio.run(
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        response = loop.run_until_complete(
             self.process_command(workflow, command_parameters)
         )
-        
+
         return fastworkflow.CommandOutput(
             workflow_id=workflow.id,
             command_responses=[
