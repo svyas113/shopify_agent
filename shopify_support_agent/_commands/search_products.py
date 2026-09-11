@@ -45,7 +45,16 @@ class Signature:
     1. NEVER use markdown tables or the '|' character.
     2. Respond with a simple list of products.
     3. Use '•' for bullets and plain text for labels (e.g., Price: $10).
-    4. NO bolding (**) or italics (_)."""
+    4. NO bolding (**) or italics (_).
+
+    TWO-PASS SEARCH STRATEGY:
+    - Pass 1: search with the user's exact query term.
+    - Pass 2 (only if Pass 1 returns zero results): use the product_type field
+      to retry with a specific category. The available store categories are
+      provided in the workflow context. Pick the most semantically relevant
+      category for the user's query (e.g. "caps" → "ACCESSORIES",
+      "sneakers" → "SHOES", "tees" → "T-SHIRTS") and set product_type to that
+      value so the second call retrieves matching products."""
 
     class Input(BaseModel):
         query: str = Field(
@@ -54,8 +63,12 @@ class Signature:
             min_length=2
         )
         product_type: Optional[str] = Field(
-            description="Filter by product type/category",
-            examples=["t-shirt", "jeans", "shoes"],
+            description=(
+                "Filter by product type/category from the store's known categories. "
+                "Use this as a fallback when the exact query returns no results. "
+                "Must match one of the store's actual product_type values exactly."
+            ),
+            examples=["SHOES", "T-SHIRTS", "ACCESSORIES"],
             default=None
         )
         in_stock_only: bool = Field(
@@ -108,14 +121,51 @@ class ResponseGenerator:
         if store is None:
             store = ShopifyStore.get_default_instance()
 
-        products = await store.client.search_products_with_inventory(
-            query=input.query,
-            product_type=input.product_type,
-            in_stock_only=input.in_stock_only,
-            limit=250
+        # Ensure product types are cached (no-op if already loaded)
+        await store.ensure_product_types_loaded_async()
+
+        # ------------------------------------------------------------------
+        # PASS 1: Search with the user's exact query (+ optional product_type
+        #         if the LLM already provided one from a prior retry).
+        # ------------------------------------------------------------------
+        gql_query_str = input.query
+        if input.product_type:
+            # LLM is explicitly requesting a category — search by product_type
+            # directly instead of combining with the keyword query, because
+            # the keyword is what failed in Pass 1.
+            gql_query_str = f"product_type:{input.product_type}"
+
+        products = await store.client.search_products_graphql(
+            query=gql_query_str,
+            first=10,
         )
 
+        # Apply in_stock_only filter in Python (GraphQL doesn't filter by stock)
+        if input.in_stock_only:
+            products = [
+                p for p in products
+                if any(
+                    v.get("inventory_quantity", 0) > 0
+                    or v.get("inventory_policy", "deny") == "continue"
+                    for v in p.get("variants", [])
+                )
+            ]
+
         if not products:
+            # ------------------------------------------------------------------
+            # PASS 1 returned nothing.
+            # Return the available product categories so the LLM can pick the
+            # most relevant one and retry this command with product_type set.
+            # ------------------------------------------------------------------
+            available_types = store.product_types  # already cached
+            if available_types:
+                types_str = ", ".join(available_types)
+                return (
+                    f"No products found matching '{input.query}'.\n\n"
+                    f"Available product categories in this store: {types_str}\n\n"
+                    f"Please retry the search using the most relevant category "
+                    f"from the list above as the product_type parameter."
+                )
             return f"No products found matching '{input.query}'."
 
         response_lines: list[str] = []
@@ -222,7 +272,14 @@ class ResponseGenerator:
     ) -> fastworkflow.CommandOutput:
         import asyncio
 
-        response = asyncio.run(
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        response = loop.run_until_complete(
             self.process_command(workflow, command_parameters)
         )
 

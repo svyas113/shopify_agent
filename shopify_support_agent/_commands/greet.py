@@ -46,8 +46,10 @@ class ResponseGenerator:
         return (
             "Hello! I am your Shopify store assistant. I'm here to help you with your shopping needs.\n\n"
             "You can ask me to:\n"
-            "- Check your order status\n"
             "- Search for products and check availability\n"
+            "- Add items to your cart and checkout when you're ready (one secure link for everything)\n"
+            "- Buy a single product instantly\n"
+            "- Check your order status\n"
             "- Track your shipments\n"
             "- Process a refund\n\n"
             "How can I help you today?"
